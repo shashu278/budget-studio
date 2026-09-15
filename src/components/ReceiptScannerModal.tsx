@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { X, Camera, Upload, Loader2, Check, Sparkles, AlertCircle, FileText, Tag, Receipt } from 'lucide-react';
 import { Transaction, Category, CurrencyConfig } from '../types';
 import { formatCurrency } from '../utils/formatters';
+import { callGeminiApi } from '../utils/apiClient';
 
 interface ReceiptScannerModalProps {
   isOpen: boolean;
@@ -54,17 +55,14 @@ export const ReceiptScannerModal: React.FC<ReceiptScannerModalProps> = ({
     setErrorMsg(null);
 
     try {
-      const res = await fetch('/api/gemini/vision', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          imageBase64: base64String,
-          mimeType: type,
-          categories: categories.map((c) => ({ id: c.id, name: c.name })),
-        }),
+      const res = await callGeminiApi('/api/gemini/vision', {
+        imageBase64: base64String,
+        mimeType: type,
+        categories: categories.map((c) => ({ id: c.id, name: c.name })),
       });
 
       if (!res.ok) {
+        if (res.status === 401) throw new Error('Sign in to use the Receipt Scanner.');
         throw new Error('Receipt scanner failed to analyze image.');
       }
 

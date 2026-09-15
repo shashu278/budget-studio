@@ -10,6 +10,8 @@ import {
   TrendingUp,
   Activity,
   Receipt,
+  Cloud,
+  CloudOff,
 } from 'lucide-react';
 import { SUPPORTED_CURRENCIES } from '../utils/formatters';
 import { DateFilter } from '../types';
@@ -23,6 +25,8 @@ interface HeaderProps {
   onOpenReceiptScanner: () => void;
   onOpenExportModal: () => void;
   onOpenGithubModal: () => void;
+  onOpenAccountModal: () => void;
+  isCloudSignedIn: boolean;
   activeTab: 'dashboard' | 'transactions' | 'budgets' | 'goals' | 'forecast' | 'analytics';
   onTabChange: (tab: 'dashboard' | 'transactions' | 'budgets' | 'goals' | 'forecast' | 'analytics') => void;
 }
@@ -36,6 +40,8 @@ export function Header({
   onOpenReceiptScanner,
   onOpenExportModal,
   onOpenGithubModal,
+  onOpenAccountModal,
+  isCloudSignedIn,
   activeTab,
   onTabChange,
 }: HeaderProps) {
@@ -106,6 +112,21 @@ export function Header({
                 ))}
               </select>
             </div>
+
+            {/* Account / Cloud Sync Status */}
+            <button
+              id="btn-account"
+              onClick={onOpenAccountModal}
+              title={isCloudSignedIn ? 'Signed in — synced across your devices' : 'Sign in to sync across devices'}
+              className={`p-2 sm:px-3 sm:py-1.5 rounded-xl text-xs font-semibold transition-colors flex items-center gap-1.5 border ${
+                isCloudSignedIn
+                  ? 'bg-emerald-50 dark:bg-emerald-950/40 hover:bg-emerald-100 dark:hover:bg-emerald-900 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800'
+                  : 'bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+              }`}
+            >
+              {isCloudSignedIn ? <Cloud className="w-4 h-4" /> : <CloudOff className="w-4 h-4" />}
+              <span className="hidden lg:inline">{isCloudSignedIn ? 'Synced' : 'Sign In'}</span>
+            </button>
 
             {/* Receipt Scan Quick Button */}
             <button

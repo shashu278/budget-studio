@@ -3,6 +3,7 @@ import { motion } from 'motion/react';
 import { AlertOctagon, TrendingUp, Sparkles, Clock, Check, X, ShieldAlert, ArrowRight } from 'lucide-react';
 import { Transaction, CurrencyConfig } from '../types';
 import { formatCurrency } from '../utils/formatters';
+import { callGeminiApi } from '../utils/apiClient';
 
 interface PurchaseInterceptorModalProps {
   isOpen: boolean;
@@ -30,15 +31,11 @@ export const PurchaseInterceptorModal: React.FC<PurchaseInterceptorModalProps> =
 
     const fetchWarning = async () => {
       try {
-        const res = await fetch('/api/gemini/intercept', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            amount: transaction.amount,
-            category: transaction.categoryId,
-            merchant: transaction.merchant,
-            description: transaction.description,
-          }),
+        const res = await callGeminiApi('/api/gemini/intercept', {
+          amount: transaction.amount,
+          category: transaction.categoryId,
+          merchant: transaction.merchant,
+          description: transaction.description,
         });
 
         if (res.ok) {
@@ -46,6 +43,8 @@ export const PurchaseInterceptorModal: React.FC<PurchaseInterceptorModalProps> =
           if (isMounted) {
             setWarningMessage(data.message);
           }
+        } else {
+          throw new Error(res.status === 401 ? 'Sign in for a personalized reflection.' : 'AI reflection unavailable.');
         }
       } catch (e) {
         console.error('Failed to get opportunity warning', e);

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   Transaction,
   Category,
@@ -18,7 +18,18 @@ import {
 } from './utils/storage';
 import { SUPPORTED_CURRENCIES } from './utils/formatters';
 import { checkSubscriptionCreep, checkBudgetAlerts, checkGoalMilestones, checkMicroSavingsSweeps } from './utils/alerts';
-import { pushToSupabase, syncFromSupabase, getSupabaseConfig } from './utils/supabase';
+import { useAuth } from './context/AuthContext';
+import {
+  newId,
+  reconcileOnSignIn,
+  fetchCloudTransactions,
+  fetchCloudGoals,
+  upsertCloudTransaction,
+  deleteCloudTransaction,
+  upsertCloudGoal,
+  deleteCloudGoal,
+  subscribeToCloudChanges,
+} from './utils/cloudSync';
 
 import { Header } from './components/Header';
 import { SummaryCards } from './components/SummaryCards';
@@ -31,6 +42,7 @@ import { CategoryModal } from './components/CategoryModal';
 import { GoalModal, DepositModal } from './components/GoalModal';
 import { ExportModal } from './components/ExportModal';
 import { GithubModal } from './components/GithubModal';
+import { AccountModal } from './components/AccountModal';
 
 // Advanced Integrated Features
 import { QuickAdd } from './components/QuickAdd';
@@ -77,16 +89,23 @@ export default function App() {
 
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [isGithubModalOpen, setIsGithubModalOpen] = useState(false);
+  const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
 
-  // Sync to localStorage
+  const { user } = useAuth();
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
+  const realtimeUnsubscribeRef = useRef<(() => void) | null>(null);
+
+  // Persist every local change to localStorage. This is now just the
+  // offline cache — the cloud is the source of truth whenever signed in
+  // (see the sign-in effect and refetchCloud below). Cloud writes happen
+  // explicitly at the point of each mutation (handleSaveTransaction etc.),
+  // not from a blanket "watch the array and push everything" effect —
+  // the old version of this app pushed the *entire* local transaction
+  // list to Supabase on every keystroke-driven state change, which is
+  // both wasteful and racy across devices.
   useEffect(() => {
     saveTransactions(transactions);
-    
-    // Auto-push to Supabase if configured
-    const config = getSupabaseConfig();
-    if (config.url && config.anonKey && transactions.length > 0) {
-      pushToSupabase().catch(() => {});
-    }
   }, [transactions]);
 
   useEffect(() => {
@@ -101,22 +120,74 @@ export default function App() {
     saveCurrency(currency);
   }, [currency]);
 
-  // Initial Auto-Sync from Supabase
-  useEffect(() => {
-    const config = getSupabaseConfig();
-    if (config.url && config.anonKey) {
-      syncFromSupabase().then((res) => {
-        if (res.success) {
-          setTransactions(loadTransactions());
-          setCategories(loadCategories());
-          setSavingsGoals(loadSavingsGoals());
-        }
-      }).catch(() => {});
-    }
-  }, []);
+  // Plain pull from the cloud (no push) — used after a realtime change
+  // notification fires, so another device's edit shows up here live.
+  const refetchCloud = useCallback(async () => {
+    if (!user) return;
+    const [cloudTx, cloudGoals] = await Promise.all([
+      fetchCloudTransactions(user.id, loadCategories()),
+      fetchCloudGoals(user.id),
+    ]);
+    setTransactions(cloudTx);
+    setSavingsGoals(cloudGoals);
+    setLastSyncedAt(Date.now());
+  }, [user]);
 
-  // Real-time synchronization across storage changes or multiple tabs
+  // Manual "Sync Now" button in the Account modal: push+pull reconcile.
+  const handleManualResync = useCallback(async () => {
+    if (!user) return;
+    setIsSyncing(true);
+    try {
+      const merged = await reconcileOnSignIn(user.id, loadTransactions(), loadSavingsGoals(), loadCategories());
+      setTransactions(merged.transactions);
+      setSavingsGoals(merged.goals);
+      setLastSyncedAt(Date.now());
+    } finally {
+      setIsSyncing(false);
+    }
+  }, [user]);
+
+  // On sign-in: push any local-only records up, pull the authoritative
+  // cloud state down, then subscribe to live realtime changes so edits
+  // on another signed-in device show up here without a refresh. On
+  // sign-out: unsubscribe and fall back to whatever's in localStorage.
   useEffect(() => {
+    if (realtimeUnsubscribeRef.current) {
+      realtimeUnsubscribeRef.current();
+      realtimeUnsubscribeRef.current = null;
+    }
+
+    if (!user) return;
+
+    let cancelled = false;
+    setIsSyncing(true);
+    reconcileOnSignIn(user.id, loadTransactions(), loadSavingsGoals(), loadCategories())
+      .then((merged) => {
+        if (cancelled) return;
+        setTransactions(merged.transactions);
+        setSavingsGoals(merged.goals);
+        setLastSyncedAt(Date.now());
+      })
+      .catch((err) => console.error('Initial cloud reconcile failed:', err))
+      .finally(() => {
+        if (!cancelled) setIsSyncing(false);
+      });
+
+    realtimeUnsubscribeRef.current = subscribeToCloudChanges(user.id, () => {
+      refetchCloud();
+    });
+
+    return () => {
+      cancelled = true;
+    };
+    // Only re-run when the signed-in user actually changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
+
+  // Cross-tab sync fallback while signed OUT (multiple tabs of the local
+  // demo). Once signed in, Realtime is the cross-device source of truth.
+  useEffect(() => {
+    if (user) return;
     const handleStorageSync = () => {
       setTransactions(loadTransactions());
       setCategories(loadCategories());
@@ -131,7 +202,7 @@ export default function App() {
       window.removeEventListener('storage', handleStorageSync);
       window.removeEventListener('budget_tracker_sync', handleStorageSync);
     };
-  }, []);
+  }, [user]);
 
   // Current currency object
   const currentCurrencyObj = useMemo(() => {
@@ -243,37 +314,48 @@ export default function App() {
     return [...creepAlerts, ...budgetAlerts, ...goalAlerts, ...sweepAlerts];
   }, [transactions, categories, filteredTransactions, savingsGoals]);
 
-  // Transaction Handlers
+  // Transaction Handlers. Local state is always updated optimistically;
+  // when signed in, the same change is also written to the cloud so it
+  // reaches every other device (Realtime then reflects it back down).
   const handleSaveTransaction = (
     data: Omit<Transaction, 'id' | 'createdAt'>,
     existingId?: string
   ) => {
     if (existingId) {
+      let updated: Transaction | undefined;
       setTransactions((prev) =>
-        prev.map((t) => (t.id === existingId ? { ...t, ...data } : t))
+        prev.map((t) => {
+          if (t.id !== existingId) return t;
+          updated = { ...t, ...data };
+          return updated;
+        })
       );
+      if (user && updated) upsertCloudTransaction(updated, user.id, categories).catch(() => {});
     } else {
       const newTx: Transaction = {
         ...data,
-        id: `tx-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        id: newId(),
         createdAt: Date.now(),
       };
       setTransactions((prev) => [newTx, ...prev]);
+      if (user) upsertCloudTransaction(newTx, user.id, categories).catch(() => {});
     }
   };
 
   const handleDuplicateTransaction = (tx: Transaction) => {
     const duplicated: Transaction = {
       ...tx,
-      id: `tx-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      id: newId(),
       description: `${tx.description} (Copy)`,
       createdAt: Date.now(),
     };
     setTransactions((prev) => [duplicated, ...prev]);
+    if (user) upsertCloudTransaction(duplicated, user.id, categories).catch(() => {});
   };
 
   const handleDeleteTransaction = (id: string) => {
     setTransactions((prev) => prev.filter((t) => t.id !== id));
+    if (user) deleteCloudTransaction(id, user.id).catch(() => {});
   };
 
   // Category Handlers
@@ -288,7 +370,7 @@ export default function App() {
     } else {
       const newCat: Category = {
         ...data,
-        id: `cat-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        id: newId(),
       };
       setCategories((prev) => [...prev, newCat]);
     }
@@ -300,42 +382,53 @@ export default function App() {
     );
   };
 
-  // Savings Goal Handlers
+  // Savings Goal Handlers (same optimistic-local + cloud-write pattern)
   const handleSaveGoal = (
     data: Omit<SavingsGoal, 'id'>,
     existingId?: string
   ) => {
     if (existingId) {
+      let updated: SavingsGoal | undefined;
       setSavingsGoals((prev) =>
-        prev.map((g) => (g.id === existingId ? { ...g, ...data } : g))
+        prev.map((g) => {
+          if (g.id !== existingId) return g;
+          updated = { ...g, ...data };
+          return updated;
+        })
       );
+      if (user && updated) upsertCloudGoal(updated, user.id).catch(() => {});
     } else {
       const newGoal: SavingsGoal = {
         ...data,
-        id: `goal-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        id: newId(),
       };
       setSavingsGoals((prev) => [...prev, newGoal]);
+      if (user) upsertCloudGoal(newGoal, user.id).catch(() => {});
     }
   };
 
   const handleDepositWithdraw = (goalId: string, deltaAmount: number) => {
+    let updated: SavingsGoal | undefined;
     setSavingsGoals((prev) =>
       prev.map((g) => {
         if (g.id === goalId) {
           const updatedAmount = Math.max(0, g.currentAmount + deltaAmount);
-          return {
+          updated = {
             ...g,
             currentAmount: updatedAmount,
             completedAt: updatedAmount >= g.targetAmount ? new Date().toISOString() : undefined,
           };
+          return updated;
         }
         return g;
       })
     );
+    if (user && updated) upsertCloudGoal(updated, user.id).catch(() => {});
   };
 
   const handleDeleteGoal = (goalId: string) => {
     setSavingsGoals((prev) => prev.filter((g) => g.id !== goalId));
+    if (user) deleteCloudGoal(goalId, user.id).catch(() => {});
   };
 
   // Refresh data from storage
@@ -361,6 +454,8 @@ export default function App() {
         onOpenReceiptScanner={() => setIsReceiptScannerOpen(true)}
         onOpenExportModal={() => setIsExportModalOpen(true)}
         onOpenGithubModal={() => setIsGithubModalOpen(true)}
+        onOpenAccountModal={() => setIsAccountModalOpen(true)}
+        isCloudSignedIn={Boolean(user)}
         activeTab={activeTab}
         onTabChange={setActiveTab}
       />
@@ -650,11 +745,20 @@ export default function App() {
         transactions={transactions}
         categories={categories}
         onDataChanged={handleDataRefresh}
+        onOpenAccountModal={() => setIsAccountModalOpen(true)}
       />
 
       <GithubModal
         isOpen={isGithubModalOpen}
         onClose={() => setIsGithubModalOpen(false)}
+      />
+
+      <AccountModal
+        isOpen={isAccountModalOpen}
+        onClose={() => setIsAccountModalOpen(false)}
+        onManualResync={handleManualResync}
+        isSyncing={isSyncing}
+        lastSyncedAt={lastSyncedAt}
       />
     </div>
   );

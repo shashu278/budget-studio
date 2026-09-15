@@ -4,6 +4,7 @@ import { Sparkles, Award, TrendingUp, RefreshCw, Layers, CheckCircle2, ChevronRi
 import { Transaction, Category, AIInsightsReport, CurrencyConfig } from '../types';
 import { get50_30_20_Breakdown } from '../utils/analytics';
 import { formatCurrency } from '../utils/formatters';
+import { callGeminiApi } from '../utils/apiClient';
 
 interface AIInsightsCardProps {
   transactions: Transaction[];
@@ -28,15 +29,20 @@ export const AIInsightsCard: React.FC<AIInsightsCardProps> = ({
   const fetchInsights = async () => {
     setIsLoading(true);
     try {
-      const res = await fetch('/api/gemini/insights', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          transactions,
-          budgets: categories.map((c) => ({ category: c.name, limit: c.budgetLimit })),
-          month: selectedMonth + 1,
-          year: selectedYear,
-        }),
+      // Server-side insights groups spend by `t.category` (a name), not
+      // this app's categoryId — resolve it or every transaction lands in
+      // an "Other" bucket regardless of its real category.
+      const categoryNameById = new Map(categories.map((c) => [c.id, c.name]));
+      const transactionsForApi = transactions.map((t) => ({
+        ...t,
+        category: categoryNameById.get(t.categoryId) || 'Uncategorized',
+      }));
+
+      const res = await callGeminiApi('/api/gemini/insights', {
+        transactions: transactionsForApi,
+        budgets: categories.map((c) => ({ category: c.name, limit: c.budgetLimit })),
+        month: selectedMonth + 1,
+        year: selectedYear,
       });
 
       if (res.ok) {

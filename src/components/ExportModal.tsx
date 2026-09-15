@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   X,
   Download,
@@ -14,10 +14,7 @@ import {
   Sparkles,
   ArrowRight,
   ExternalLink,
-  Database,
-  RefreshCw,
-  KeyRound,
-  Globe,
+  Cloud,
 } from 'lucide-react';
 import { Transaction, Category } from '../types';
 import {
@@ -27,12 +24,6 @@ import {
   resetDataToDefaults,
   clearAllData,
 } from '../utils/storage';
-import {
-  getSupabaseConfig,
-  saveSupabaseConfig,
-  syncFromSupabase,
-  pushToSupabase,
-} from '../utils/supabase';
 
 interface ExportModalProps {
   isOpen: boolean;
@@ -40,6 +31,7 @@ interface ExportModalProps {
   transactions: Transaction[];
   categories: Category[];
   onDataChanged: () => void;
+  onOpenAccountModal: () => void;
 }
 
 export function ExportModal({
@@ -48,115 +40,16 @@ export function ExportModal({
   transactions,
   categories,
   onDataChanged,
+  onOpenAccountModal,
 }: ExportModalProps) {
-  const [activeTab, setActiveTab] = useState<'supabase' | 'migrate' | 'backup' | 'utils'>('supabase');
+  const [activeTab, setActiveTab] = useState<'migrate' | 'backup' | 'utils'>('backup');
   const [pasteData, setPasteData] = useState('');
   const [statusMessage, setStatusMessage] = useState<{ text: string; isError?: boolean } | null>(null);
   const [copiedScript, setCopiedScript] = useState(false);
-  
-  // Supabase state
-  const [supabaseUrl, setSupabaseUrl] = useState('');
-  const [supabaseAnonKey, setSupabaseAnonKey] = useState('');
-  const [supabaseTableName, setSupabaseTableName] = useState('');
-  const [isSyncingSupabase, setIsSyncingSupabase] = useState(false);
-  const [isPushingSupabase, setIsPushingSupabase] = useState(false);
-  const [syncLogs, setSyncLogs] = useState<string[]>([]);
-  const [showLogs, setShowLogs] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => {
-    if (isOpen) {
-      const config = getSupabaseConfig();
-      setSupabaseUrl(config.url);
-      setSupabaseAnonKey(config.anonKey);
-      setSupabaseTableName(config.tableName || '');
-    }
-  }, [isOpen]);
-
   if (!isOpen) return null;
-
-  const handlePushToSupabase = async () => {
-    if (!supabaseUrl.trim() || !supabaseAnonKey.trim()) {
-      setStatusMessage({
-        text: 'Please enter your Supabase Project URL and API Key.',
-        isError: true,
-      });
-      return;
-    }
-
-    saveSupabaseConfig({
-      url: supabaseUrl.trim(),
-      anonKey: supabaseAnonKey.trim(),
-      tableName: supabaseTableName.trim(),
-    });
-
-    setIsPushingSupabase(true);
-    setStatusMessage(null);
-    setSyncLogs([]);
-
-    try {
-      const result = await pushToSupabase(supabaseTableName.trim());
-      if (result.details) {
-        setSyncLogs(result.details);
-      }
-      if (result.success) {
-        setStatusMessage({ text: `🎉 ${result.message}` });
-      } else {
-        setStatusMessage({ text: result.message, isError: true });
-        setShowLogs(true);
-      }
-    } catch (err: any) {
-      setStatusMessage({
-        text: `Error connecting to Supabase: ${err?.message || 'Check your URL and API key'}`,
-        isError: true,
-      });
-    } finally {
-      setIsPushingSupabase(false);
-    }
-  };
-
-  const handleSaveAndSyncSupabase = async () => {
-    if (!supabaseUrl.trim() || !supabaseAnonKey.trim()) {
-      setStatusMessage({
-        text: 'Please enter your Supabase Project URL and Anon API Key.',
-        isError: true,
-      });
-      return;
-    }
-
-    saveSupabaseConfig({
-      url: supabaseUrl.trim(),
-      anonKey: supabaseAnonKey.trim(),
-      tableName: supabaseTableName.trim(),
-    });
-
-    setIsSyncingSupabase(true);
-    setStatusMessage(null);
-    setSyncLogs([]);
-
-    try {
-      const result = await syncFromSupabase(supabaseTableName.trim());
-      if (result.details) {
-        setSyncLogs(result.details);
-      }
-      if (result.success) {
-        setStatusMessage({ text: `🎉 ${result.message}` });
-        onDataChanged();
-      } else {
-        setStatusMessage({ text: result.message, isError: true });
-        setShowLogs(true);
-      }
-    } catch (err: any) {
-      setStatusMessage({
-        text: `Error connecting to Supabase: ${err?.message || 'Check your URL and API key'}`,
-        isError: true,
-      });
-    } finally {
-      setIsSyncingSupabase(false);
-    }
-  };
-
 
   const migrationScript = `copy(JSON.stringify(localStorage))`;
 
@@ -258,8 +151,8 @@ export function ExportModal({
               <Sparkles className="w-4 h-4" />
             </div>
             <div>
-              <h3 className="text-base font-bold text-slate-900 dark:text-white">Data & Version Sync Assistant</h3>
-              <p className="text-xs text-slate-500 dark:text-slate-400">Migrate records from your previous Vercel app or backup files</p>
+              <h3 className="text-base font-bold text-slate-900 dark:text-white">Backup &amp; Migration Tools</h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400">Local export/import, one-time migration, and reset — for cross-device sync see Account</p>
             </div>
           </div>
           <button
@@ -270,19 +163,25 @@ export function ExportModal({
           </button>
         </div>
 
+        {/* Cloud sync now lives in the Account modal, behind real sign-in — not here. */}
+        <div className="mx-6 mt-3 p-3 bg-indigo-50/80 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-900/50 rounded-xl flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 text-xs text-indigo-800 dark:text-indigo-300">
+            <Cloud className="w-4 h-4 shrink-0" />
+            <span>Cross-device sync now runs through your account, not a pasted database key.</span>
+          </div>
+          <button
+            onClick={() => {
+              onClose();
+              onOpenAccountModal();
+            }}
+            className="shrink-0 px-3 py-1.5 text-[11px] font-bold bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg"
+          >
+            Open Account
+          </button>
+        </div>
+
         {/* Tab Navigation */}
         <div className="flex border-b border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/50 px-6 pt-2 overflow-x-auto">
-          <button
-            onClick={() => setActiveTab('supabase')}
-            className={`pb-2.5 px-3 text-xs font-bold border-b-2 transition-all cursor-pointer whitespace-nowrap flex items-center gap-1.5 ${
-              activeTab === 'supabase'
-                ? 'border-indigo-600 text-indigo-600 dark:text-indigo-400'
-                : 'border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-300'
-            }`}
-          >
-            <Database className="w-3.5 h-3.5" />
-            Supabase Cloud Sync
-          </button>
           <button
             onClick={() => setActiveTab('migrate')}
             className={`pb-2.5 px-3 text-xs font-bold border-b-2 transition-all cursor-pointer whitespace-nowrap flex items-center gap-1.5 ${
@@ -335,130 +234,6 @@ export function ExportModal({
               <span>{statusMessage.text}</span>
             </div>
           )}
-
-          {activeTab === 'supabase' && (
-            <div className="space-y-4">
-              <div className="bg-emerald-50/80 dark:bg-emerald-950/30 border border-emerald-200/80 dark:border-emerald-900/50 rounded-xl p-3.5">
-                <div className="flex items-center gap-2">
-                  <div className="w-6 h-6 rounded-md bg-emerald-600 text-white flex items-center justify-center text-xs font-bold">
-                    ⚡
-                  </div>
-                  <div>
-                    <h4 className="text-xs font-bold text-emerald-950 dark:text-emerald-200">
-                      Supabase Cloud Database Sync
-                    </h4>
-                    <p className="text-[11px] text-emerald-800 dark:text-emerald-300">
-                      Pull your previous 2 months of transactions directly from your Supabase database.
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1 flex items-center gap-1.5">
-                    <Globe className="w-3.5 h-3.5 text-slate-400" />
-                    Supabase Project URL
-                  </label>
-                  <input
-                    type="url"
-                    placeholder="https://xyzcompany.supabase.co"
-                    value={supabaseUrl}
-                    onChange={(e) => setSupabaseUrl(e.target.value)}
-                    className="w-full px-3 py-2 text-xs font-mono bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:outline-none dark:text-white"
-                  />
-                  <span className="text-[10px] text-slate-400 mt-0.5 block">
-                    Found in your Supabase Dashboard &gt; Project Settings &gt; API &gt; Project URL
-                  </span>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1 flex items-center gap-1.5">
-                    <KeyRound className="w-3.5 h-3.5 text-slate-400" />
-                    Supabase Key (Use service_role to bypass RLS)
-                  </label>
-                  <input
-                    type="password"
-                    placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-                    value={supabaseAnonKey}
-                    onChange={(e) => setSupabaseAnonKey(e.target.value)}
-                    className="w-full px-3 py-2 text-xs font-mono bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:outline-none dark:text-white"
-                  />
-                  <span className="text-[10px] text-slate-400 mt-0.5 block">
-                    Found in Supabase Dashboard &gt; Project Settings &gt; API. If your table has Row Level Security (RLS), you MUST use the <strong className="text-emerald-600 dark:text-emerald-400">service_role secret</strong> instead of the anon key.
-                  </span>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1 flex items-center gap-1.5">
-                    <Database className="w-3.5 h-3.5 text-slate-400" />
-                    Table Name (Optional / Auto-detect)
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="e.g. transactions, expenses, budget, user_transactions"
-                    value={supabaseTableName}
-                    onChange={(e) => setSupabaseTableName(e.target.value)}
-                    className="w-full px-3 py-2 text-xs font-mono bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:outline-none dark:text-white"
-                  />
-                  <span className="text-[10px] text-slate-400 mt-0.5 block">
-                    Leave blank to auto-scan common tables, or type your exact Supabase table name.
-                  </span>
-                </div>
-
-                <div className="flex flex-col sm:flex-row gap-3 w-full">
-                  <button
-                    onClick={handlePushToSupabase}
-                    disabled={isPushingSupabase || isSyncingSupabase}
-                    className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-900 dark:bg-slate-700 dark:hover:bg-slate-600 disabled:opacity-50 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-2 transition-all shadow-sm cursor-pointer"
-                  >
-                    <Upload className={`w-4 h-4 ${isPushingSupabase ? 'animate-bounce' : ''}`} />
-                    <span>{isPushingSupabase ? 'Pushing...' : 'Push Local to Cloud'}</span>
-                  </button>
-                  <button
-                    onClick={handleSaveAndSyncSupabase}
-                    disabled={isSyncingSupabase || isPushingSupabase}
-                    className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-2 transition-all shadow-sm cursor-pointer"
-                  >
-                    <RefreshCw className={`w-4 h-4 ${isSyncingSupabase ? 'animate-spin' : ''}`} />
-                    <span>{isSyncingSupabase ? 'Pulling...' : 'Fetch All from Cloud'}</span>
-                  </button>
-                </div>
-              </div>
-
-              {syncLogs.length > 0 && (
-                <div className="p-3 bg-slate-900 text-slate-200 rounded-xl font-mono text-[11px] space-y-1.5">
-                  <div className="flex items-center justify-between font-bold text-slate-400 pb-1 border-b border-slate-800">
-                    <span>Supabase Query Diagnostics</span>
-                    <button
-                      onClick={() => setShowLogs(!showLogs)}
-                      className="text-xs text-indigo-400 hover:underline cursor-pointer"
-                    >
-                      {showLogs ? 'Hide Details' : 'Show Details'}
-                    </button>
-                  </div>
-                  {showLogs && (
-                    <div className="max-h-32 overflow-y-auto space-y-1 pt-1">
-                      {syncLogs.map((log, idx) => (
-                        <div key={idx} className="leading-tight text-slate-300">
-                          {log}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <div className="p-3 bg-slate-50 dark:bg-slate-800/40 rounded-xl border border-slate-200 dark:border-slate-800 text-[11px] text-slate-600 dark:text-slate-400 space-y-1.5">
-                <span className="font-semibold text-slate-800 dark:text-slate-200">Tips if no records are found:</span>
-                <ul className="list-disc list-inside space-y-0.5 text-slate-500 dark:text-slate-400">
-                  <li><strong>Check Table Name</strong>: If your table has a custom name (e.g. <code className="text-emerald-600 font-mono">my_expenses</code> or <code className="text-emerald-600 font-mono">records</code>), type it into the Table Name field above.</li>
-                  <li><strong>Row Level Security (RLS)</strong>: In your Supabase dashboard &gt; Authentication &gt; Policies (or Table Editor), make sure <code className="text-emerald-600 font-mono">SELECT</code> access is enabled for the <code className="text-emerald-600 font-mono">anon</code> role, or temporarily disable RLS on the table to export.</li>
-                </ul>
-              </div>
-            </div>
-          )}
-
 
           {activeTab === 'migrate' && (
             <div className="space-y-4">

@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { Sparkles, Mic, MicOff, Camera, Loader2, Check, X, Tag, FileText, AlertCircle } from 'lucide-react';
 import { Transaction, Category, CurrencyConfig } from '../types';
 import { formatCurrency } from '../utils/formatters';
+import { callGeminiApi } from '../utils/apiClient';
 
 interface QuickAddProps {
   categories: Category[];
@@ -31,16 +32,13 @@ export const QuickAdd: React.FC<QuickAddProps> = ({
     setErrorMsg(null);
 
     try {
-      const res = await fetch('/api/gemini/parse', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: promptText,
-          categories: categories.map((c) => ({ id: c.id, name: c.name })),
-        }),
+      const res = await callGeminiApi('/api/gemini/parse', {
+        text: promptText,
+        categories: categories.map((c) => ({ id: c.id, name: c.name })),
       });
 
       if (!res.ok) {
+        if (res.status === 401) throw new Error('Sign in to use AI Smart Log.');
         throw new Error('Failed to parse text with AI');
       }
 

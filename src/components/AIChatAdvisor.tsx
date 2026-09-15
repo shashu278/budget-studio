@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { Transaction, Category, SavingsGoal, AIChatMessage, CurrencyConfig } from '../types';
 import { formatCurrency } from '../utils/formatters';
+import { callGeminiApi } from '../utils/apiClient';
 
 interface AIChatAdvisorProps {
   transactions: Transaction[];
@@ -66,20 +67,25 @@ export const AIChatAdvisor: React.FC<AIChatAdvisorProps> = ({
     setLoading(true);
 
     try {
-      const res = await fetch('/api/gemini/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: textToSend,
-          transactions,
-          budgets: categories.map((c) => ({ name: c.name, limit: c.budgetLimit })),
-          goals: goals.map((g) => ({ name: g.name, current: g.currentAmount, target: g.targetAmount })),
-          conversationHistory: messages.map((m) => ({ role: m.role, content: m.content })),
-        }),
+      // The server prompt reads a `category` name per transaction (it has
+      // no concept of this app's categoryId) — resolve that here, or the
+      // advisor silently sees every transaction as uncategorized.
+      const categoryNameById = new Map(categories.map((c) => [c.id, c.name]));
+      const transactionsForApi = transactions.map((t) => ({
+        ...t,
+        category: categoryNameById.get(t.categoryId) || 'Uncategorized',
+      }));
+
+      const res = await callGeminiApi('/api/gemini/chat', {
+        message: textToSend,
+        transactions: transactionsForApi,
+        budgets: categories.map((c) => ({ name: c.name, limit: c.budgetLimit })),
+        goals: goals.map((g) => ({ name: g.name, current: g.currentAmount, target: g.targetAmount })),
+        conversationHistory: messages.map((m) => ({ role: m.role, content: m.content })),
       });
 
       if (!res.ok) {
-        throw new Error('Failed to get advisor reply');
+        throw new Error(res.status === 401 ? 'Sign in to talk to your AI advisor.' : 'Failed to get advisor reply');
       }
 
       const data = await res.json();

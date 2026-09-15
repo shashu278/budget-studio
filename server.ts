@@ -2,12 +2,46 @@ import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
+import { createClient } from "@supabase/supabase-js";
 
 const app = express();
 const PORT = 3000;
 
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+
+// --- Auth gate for the AI endpoints ---------------------------------
+// Previously every /api/gemini/* route was open to the public internet
+// with no auth check at all: anyone who found this app's URL could call
+// them directly and spend the GEMINI_API_KEY quota for free. Now, when
+// this deployment has Supabase configured, a request must carry a valid
+// signed-in user's access token. When Supabase ISN'T configured at all
+// (no account system exists for this deployment), requests are let
+// through unauthenticated — matching the client, which also falls back
+// to local-only mode in that case.
+const authSupabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || "";
+const authSupabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || "";
+const authClient = authSupabaseUrl && authSupabaseAnonKey ? createClient(authSupabaseUrl, authSupabaseAnonKey) : null;
+
+async function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+  if (!authClient) return next();
+
+  const header = req.headers.authorization || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+  if (!token) {
+    return res.status(401).json({ error: "Sign in required to use AI features." });
+  }
+
+  const { data, error } = await authClient.auth.getUser(token);
+  if (error || !data.user) {
+    return res.status(401).json({ error: "Your session has expired. Please sign in again." });
+  }
+
+  (req as any).userId = data.user.id;
+  next();
+}
+
+app.use("/api/gemini", requireAuth);
 
 // Lazy initializer for Gemini Client
 function getGeminiClient() {
@@ -38,6 +72,7 @@ async function callGeminiSafe(
   const models = [
     options.primaryModel || "gemini-2.5-flash",
     "gemini-3.1-flash-lite",
+    "gemini-3.5-flash-lite",
     "gemini-2.5-flash",
   ];
 
@@ -94,6 +129,92 @@ app.get("/api/health", (_req, res) => {
   res.json({ status: "ok", aiEnabled: Boolean(process.env.GEMINI_API_KEY) });
 });
 
+// --- Shared heuristic parsing (used when Gemini is unreachable, or as a
+// last-resort if it returns something unusable). The old version only
+// matched a category if its full name appeared verbatim in the text
+// ("Groceries & Food" never matches "groceries"), so it almost always
+// fell back to a hardcoded "Food & Dining" default. This scores every
+// real category by keyword overlap instead, generalizing to whatever
+// category names the user actually has.
+const CATEGORY_KEYWORD_HINTS: Record<string, string[]> = {
+  grocer: ["grocery", "groceries", "supermarket", "trader joe", "whole foods", "walmart", "costco", "safeway", "kroger", "market"],
+  dining: ["restaurant", "cafe", "coffee", "starbucks", "dinner", "lunch", "breakfast", "brunch", "sushi", "pizza", "diner", "takeout", "delivery"],
+  transport: ["uber", "lyft", "gas station", "fuel", "parking", "toll", "metro", "transit", "taxi", "flight", "airfare", "train"],
+  hous: ["rent", "mortgage", "hoa", "apartment", "lease", "landlord"],
+  util: ["electric", "water bill", "internet", "wifi", "utility", "utilities", "gas bill", "phone bill"],
+  entertain: ["movie", "netflix", "spotify", "concert", "game", "streaming", "ticket"],
+  health: ["gym", "doctor", "pharmacy", "medical", "dentist", "fitness", "clinic"],
+  shop: ["amazon", "mall", "clothes", "clothing", "shoes", "store"],
+  educat: ["book", "course", "tuition", "textbook", "class"],
+  subscri: ["subscription", "membership", "monthly fee"],
+  salary: ["salary", "paycheck", "payroll", "wages"],
+  freelance: ["freelance", "contract work", "gig", "client payment", "invoice paid"],
+  invest: ["dividend", "interest earned", "capital gain", "stock sale"],
+  gift: ["gift", "refund", "reimbursement", "cashback"],
+};
+
+function guessCategory(text: string, categoryNames: string[], isIncome: boolean): string {
+  const lower = text.toLowerCase();
+  const stopWords = new Set(["and", "the", "for", "with", "from"]);
+
+  let best: string | null = null;
+  let bestScore = 0;
+
+  for (const name of categoryNames) {
+    let score = 0;
+    const words = name
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((w) => w.length >= 3 && !stopWords.has(w));
+
+    for (const w of words) {
+      if (new RegExp(`\\b${w}\\b`).test(lower)) score += 2;
+    }
+
+    for (const [hintKey, hints] of Object.entries(CATEGORY_KEYWORD_HINTS)) {
+      if (words.some((w) => w.includes(hintKey) || hintKey.includes(w))) {
+        for (const h of hints) {
+          if (lower.includes(h)) score += 3;
+        }
+      }
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = name;
+    }
+  }
+
+  if (best) return best;
+  if (isIncome) {
+    return categoryNames.find((n) => /salary|income|pay/i.test(n)) || categoryNames[0] || "Salary";
+  }
+  return categoryNames.find((n) => /misc|other|general/i.test(n)) || categoryNames[0] || "Other";
+}
+
+function parseAmount(text: string): number {
+  // Handles "$1,200", "1200.50", "$1.2k" — the original regex stopped at
+  // the first digit run and ignored thousands separators and k-suffixes.
+  const kMatch = text.match(/\$?\s?([0-9]+(?:\.[0-9]+)?)\s?[kK]\b/);
+  if (kMatch) return parseFloat(kMatch[1]) * 1000;
+
+  const match = text.match(/\$?\s?([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{1,2})?|[0-9]+(?:\.[0-9]{1,2})?)/);
+  if (!match) return 25;
+  const cleaned = match[1].replace(/,/g, "");
+  const value = parseFloat(cleaned);
+  return isNaN(value) ? 25 : value;
+}
+
+function guessMerchant(text: string): string {
+  const withoutAmount = text.replace(/\$?\s?[0-9][0-9,.]*\s?[kK]?/g, " ");
+  const fillerWords = /\b(spent|received|paid|bought|got|earned|deposit(ed)?|log(ged)?|add(ed)?|on|at|for|from|to|of|a|an|the|today|yesterday)\b/gi;
+  const cleaned = withoutAmount
+    .replace(fillerWords, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned ? cleaned.slice(0, 40) : "Quick Entry";
+}
+
 // 2. Parse Natural Language or Voice input into structured transaction
 app.post("/api/gemini/parse", async (req, res) => {
   const { text, categories = [] } = req.body;
@@ -102,27 +223,22 @@ app.post("/api/gemini/parse", async (req, res) => {
     return res.status(400).json({ error: "Text prompt is required" });
   }
 
-  // Heuristic parser function used as baseline and fallback
+  // Heuristic parser used when Gemini is unreachable, or its output fails
+  // validation below.
+  const fallbackCategoryNames: string[] = categories.length > 0
+    ? categories.map((c: any) => (typeof c === "string" ? c : c.name))
+    : ["Food & Dining", "Transportation", "Housing & Rent", "Utilities & Bills", "Entertainment", "Shopping", "Health & Fitness", "Education", "Personal Care", "Groceries", "Subscriptions", "Travel", "Salary", "Freelance", "Investments", "Side Hustle", "Other"];
+
   const getFallbackParsed = () => {
-    const amountMatch = text.match(/\$?([0-9]+(?:\.[0-9]{1,2})?)/);
-    const amount = amountMatch ? parseFloat(amountMatch[1]) : 25;
+    const amount = parseAmount(text);
     const isIncome = /income|salary|earned|received|deposit|paycheck|freelance|bonus|dividend/i.test(text);
-    
-    // Attempt to match category by name keyword
-    let matchedCategory = isIncome ? "Salary" : "Food & Dining";
-    for (const c of categories) {
-      const cName = typeof c === "string" ? c : c.name;
-      if (cName && new RegExp(`\\b${cName}\\b`, "i").test(text)) {
-        matchedCategory = cName;
-        break;
-      }
-    }
+    const matchedCategory = guessCategory(text, fallbackCategoryNames, isIncome);
 
     return {
       type: isIncome ? "income" : "expense",
       amount: amount || 25,
       category: matchedCategory,
-      merchant: text.replace(/\$?([0-9]+(?:\.[0-9]{1,2})?)/, "").trim().slice(0, 30) || "Quick Entry",
+      merchant: guessMerchant(text),
       description: text,
       date: new Date().toISOString().split("T")[0],
       aiAnalysis: isIncome
@@ -140,38 +256,56 @@ app.post("/api/gemini/parse", async (req, res) => {
     }
 
     const todayStr = new Date().toISOString().split("T")[0];
-    const categoryList = categories.length > 0
-      ? categories.map((c: any) => (typeof c === "string" ? c : c.name)).join(", ")
-      : "Food & Dining, Transportation, Housing & Rent, Utilities & Bills, Entertainment, Shopping, Health & Fitness, Education, Personal Care, Groceries, Subscriptions, Travel, Salary, Freelance, Investments, Side Hustle, Other";
+    const categoryNames: string[] = fallbackCategoryNames;
 
     const prompt = `Extract financial transaction details from the following user description.
 Input: "${text}"
 
-Available Categories: ${categoryList}
+Available Categories: ${categoryNames.join(", ")}
 Today's Date: ${todayStr}
 
-Extract and return ONLY a valid JSON object matching this schema:
-{
-  "type": "expense" or "income",
-  "amount": number,
-  "category": string (match the most appropriate available category),
-  "merchant": string (store, vendor, employer, or empty string),
-  "description": string (concise summary of item or purpose),
-  "date": "YYYY-MM-DD" (use current date ${todayStr} if unspecified),
-  "aiAnalysis": string (1-2 sentence behavioral/financial reflection on why this purchase was made and its budgetary wisdom),
-  "isTaxDeductible": boolean (true if eligible business/freelance expense like tools, work supplies, office, software),
-  "isSubscription": boolean (true if recurring SaaS, membership, streaming, or utility)
-}`;
+Extract the transaction. "category" MUST be exactly one of the Available Categories listed above — pick the closest match, never invent a new one. If the date is unspecified, use ${todayStr}.`;
+
+    // Constraining "category" to an enum of the app's real category names
+    // (instead of letting the model free-write any string) is what
+    // actually fixes "the AI doesn't recognize my category" confusion:
+    // the model can no longer return a near-miss like "Groceries" when
+    // the real category is "Groceries & Food" — it has to pick from the
+    // exact list, and the client no longer has to fuzzy-match around it.
+    const parseSchema = {
+      type: Type.OBJECT,
+      properties: {
+        type: { type: Type.STRING, format: "enum", enum: ["expense", "income"] },
+        amount: { type: Type.NUMBER },
+        category: { type: Type.STRING, format: "enum", enum: categoryNames },
+        merchant: { type: Type.STRING },
+        description: { type: Type.STRING },
+        date: { type: Type.STRING, description: "YYYY-MM-DD" },
+        aiAnalysis: { type: Type.STRING },
+        isTaxDeductible: { type: Type.BOOLEAN },
+        isSubscription: { type: Type.BOOLEAN },
+      },
+      required: ["type", "amount", "category", "description", "date"],
+    };
 
     const response = await callGeminiSafe(ai, {
       contents: prompt,
       config: {
         responseMimeType: "application/json",
+        responseSchema: parseSchema,
       },
     });
 
     const responseText = response.text || "{}";
     const parsedData = JSON.parse(responseText);
+
+    // Belt-and-suspenders: even with a schema-constrained call, don't
+    // trust a response with no usable amount or an out-of-list category.
+    if (!parsedData || typeof parsedData.amount !== "number" || parsedData.amount <= 0 || !categoryNames.includes(parsedData.category)) {
+      console.warn("Gemini Parse returned an unusable payload, using heuristic fallback instead.");
+      return res.json(getFallbackParsed());
+    }
+
     return res.json(parsedData);
   } catch (error: any) {
     console.warn("Gemini Parse Fallback engaged:", error?.message || error);
@@ -208,22 +342,28 @@ app.post("/api/gemini/vision", async (req, res) => {
     // Clean base64 header if present
     const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z+]+;base64,/, "");
     const todayStr = new Date().toISOString().split("T")[0];
-    const categoryList = categories.length > 0
-      ? categories.map((c: any) => (typeof c === "string" ? c : c.name)).join(", ")
-      : "Food & Dining, Transportation, Housing & Rent, Utilities & Bills, Entertainment, Shopping, Health & Fitness, Education, Personal Care, Groceries, Subscriptions, Travel, Salary, Freelance, Investments, Other";
+    const categoryNames: string[] = categories.length > 0
+      ? categories.map((c: any) => (typeof c === "string" ? c : c.name))
+      : ["Food & Dining", "Transportation", "Housing & Rent", "Utilities & Bills", "Entertainment", "Shopping", "Health & Fitness", "Education", "Personal Care", "Groceries", "Subscriptions", "Travel", "Salary", "Freelance", "Investments", "Other"];
 
-    const prompt = `Analyze this receipt or invoice image. Extract the financial transaction details and return ONLY a JSON object with:
-{
-  "type": "expense",
-  "amount": number (the final grand total paid),
-  "category": string (choose best fit from: ${categoryList}),
-  "merchant": string (vendor or store name),
-  "description": string (summary of key items bought, e.g. "Groceries: milk, produce, bakery items"),
-  "date": "YYYY-MM-DD" (extracted receipt date or ${todayStr} if not visible),
-  "aiAnalysis": string (1-2 sentence financial insight into this receipt spending),
-  "isTaxDeductible": boolean (true if work supplies, business meal, or equipment),
-  "isSubscription": boolean (false for retail receipts)
-}`;
+    const prompt = `Analyze this receipt or invoice image. Extract the financial transaction details.
+"category" MUST be exactly one of: ${categoryNames.join(", ")}. Use the receipt's date if visible, otherwise ${todayStr}. "amount" is the final grand total paid.`;
+
+    const visionSchema = {
+      type: Type.OBJECT,
+      properties: {
+        type: { type: Type.STRING, format: "enum", enum: ["expense"] },
+        amount: { type: Type.NUMBER },
+        category: { type: Type.STRING, format: "enum", enum: categoryNames },
+        merchant: { type: Type.STRING },
+        description: { type: Type.STRING },
+        date: { type: Type.STRING, description: "YYYY-MM-DD" },
+        aiAnalysis: { type: Type.STRING },
+        isTaxDeductible: { type: Type.BOOLEAN },
+        isSubscription: { type: Type.BOOLEAN },
+      },
+      required: ["type", "amount", "category", "description", "date"],
+    };
 
     const response = await callGeminiSafe(ai, {
       contents: {
@@ -241,11 +381,18 @@ app.post("/api/gemini/vision", async (req, res) => {
       },
       config: {
         responseMimeType: "application/json",
+        responseSchema: visionSchema,
       },
     });
 
     const responseText = response.text || "{}";
     const parsedData = JSON.parse(responseText);
+
+    if (!parsedData || typeof parsedData.amount !== "number" || parsedData.amount <= 0 || !categoryNames.includes(parsedData.category)) {
+      console.warn("Gemini Vision returned an unusable payload, using fallback receipt instead.");
+      return res.json(getFallbackReceipt());
+    }
+
     return res.json(parsedData);
   } catch (error: any) {
     console.warn("Gemini Vision Fallback engaged:", error?.message || error);
@@ -408,10 +555,54 @@ If NO action is requested, return a JSON object with:
   "response": "Your markdown answer"
 }`;
 
+    // Constrain any logged transaction's category to the user's real
+    // category names (derived from the budgets payload, since that's
+    // what the client actually sends) so a chat-triggered "add
+    // transaction" can't invent a category the rest of the app won't
+    // recognize.
+    const chatCategoryNames: string[] = budgets
+      .map((b: any) => (typeof b === "string" ? b : b?.name))
+      .filter((n: any) => typeof n === "string" && n.length > 0);
+
+    const transactionSchema: any = {
+      type: Type.OBJECT,
+      properties: {
+        type: { type: Type.STRING, format: "enum", enum: ["income", "expense"] },
+        amount: { type: Type.NUMBER },
+        category: chatCategoryNames.length > 0
+          ? { type: Type.STRING, format: "enum", enum: chatCategoryNames }
+          : { type: Type.STRING },
+        merchant: { type: Type.STRING },
+        description: { type: Type.STRING },
+        date: { type: Type.STRING, description: "YYYY-MM-DD" },
+        isRecurring: { type: Type.BOOLEAN },
+        recurringFrequency: { type: Type.STRING, format: "enum", enum: ["daily", "weekly", "monthly", "yearly"] },
+      },
+      required: ["type", "amount", "category", "description", "date"],
+    };
+
+    const chatSchema = {
+      type: Type.OBJECT,
+      properties: {
+        response: { type: Type.STRING },
+        action: {
+          type: Type.OBJECT,
+          nullable: true,
+          properties: {
+            type: { type: Type.STRING, format: "enum", enum: ["add_transaction"] },
+            transaction: transactionSchema,
+          },
+          required: ["type", "transaction"],
+        },
+      },
+      required: ["response"],
+    };
+
     const response = await callGeminiSafe(ai, {
       contents: prompt,
       config: {
         responseMimeType: "application/json",
+        responseSchema: chatSchema,
       },
     });
 
@@ -492,17 +683,23 @@ Evaluate their performance:
 2. Provide a 1-2 sentence Peer Benchmark comparing their metrics against the classic 50/30/20 rule (50% Needs, 30% Wants, 20% Savings).
 3. Provide 3 specific, deeply observant, and actionable behavioral insights (maximum 2 sentences each).
 
-Return ONLY a JSON object:
-{
-  "grade": string,
-  "benchmark": string,
-  "insights": [string, string, string]
-}`;
+Grade must be one of: A+, A, A-, B+, B, B-, C+, C, C-, D, F.`;
+
+    const insightsSchema = {
+      type: Type.OBJECT,
+      properties: {
+        grade: { type: Type.STRING, format: "enum", enum: ["A+", "A", "A-", "B+", "B", "B-", "C+", "C", "C-", "D", "F"] },
+        benchmark: { type: Type.STRING },
+        insights: { type: Type.ARRAY, items: { type: Type.STRING }, minItems: "3", maxItems: "3" },
+      },
+      required: ["grade", "benchmark", "insights"],
+    };
 
     const response = await callGeminiSafe(ai, {
       contents: prompt,
       config: {
         responseMimeType: "application/json",
+        responseSchema: insightsSchema,
       },
     });
 

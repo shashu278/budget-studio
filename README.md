@@ -1,6 +1,6 @@
 # Budget Tracker 📊
 
-A modern, offline-first personal finance and budget management application built with **React 19**, **TypeScript**, **Tailwind CSS**, and **Recharts**.
+A personal finance and budget management application built with **React 19**, **TypeScript**, **Tailwind CSS**, and **Recharts**, with optional real-time cross-device sync backed by **Supabase**.
 
 ---
 
@@ -11,7 +11,8 @@ A modern, offline-first personal finance and budget management application built
 - **Savings Goals & Sinking Funds**: Create target milestones (Emergency Fund, Vacation, Vehicle, etc.) with real-time deposit/withdrawal tracking and confetti celebrations.
 - **Interactive Analytics**: Dynamic cashflow charts, category expense donuts, and cumulative daily spending velocity powered by Recharts.
 - **Multi-Currency Support**: Switch instantly between USD ($), EUR (€), GBP (£), JPY (¥), CAD, AUD, INR (₹), CHF, and SGD.
-- **Data Privacy & Backup**: 100% client-side local persistence with instant **CSV Export**, **JSON Backup & Restore**, and demo sample data reset.
+- **Account & Cloud Sync**: Sign in (email/password, via Supabase Auth) to sync transactions and goals live across every device signed into the same account — no local-only silo, no pasted database keys. Without signing in, the app runs entirely offline against `localStorage`.
+- **Data Privacy & Backup**: Instant **CSV Export**, **JSON Backup & Restore**, and demo sample data reset, independent of cloud sync.
 - **Export to GitHub**: Fully structured, modular codebase ready to push directly to GitHub via Google AI Studio's export menu or cloned for local development.
 
 ---
@@ -20,8 +21,8 @@ A modern, offline-first personal finance and budget management application built
 
 ### 1. Clone the repository
 ```bash
-git clone https://github.com/your-username/budget-tracker.git
-cd budget-tracker
+git clone https://github.com/shashu278/budget-studio.git
+cd budget-studio
 ```
 
 ### 2. Install dependencies
@@ -29,13 +30,29 @@ cd budget-tracker
 npm install
 ```
 
-### 3. Start development server
+### 3. (Optional) Enable AI features and cloud sync
+```bash
+cp .env.example .env
+# then fill in:
+#   GEMINI_API_KEY=...
+#   VITE_SUPABASE_URL=...           (same project as your other BudgetIQ app, if any)
+#   VITE_SUPABASE_ANON_KEY=...
+```
+Without these, the app still runs fully offline: AI features fall back to
+local heuristics, and data stays in this browser's `localStorage`.
+
+If you're pointing this at the same Supabase project as another BudgetIQ
+app, run `supabase/migrations/0001_schema_and_rls.sql` and
+`supabase/migrations/0002_studio_compat.sql` once in the Supabase SQL
+Editor first — they're additive and safe to re-run.
+
+### 4. Start development server
 ```bash
 npm run dev
 ```
 Open [http://localhost:3000](http://localhost:3000) in your browser.
 
-### 4. Build for production
+### 5. Build for production
 ```bash
 npm run build
 ```
