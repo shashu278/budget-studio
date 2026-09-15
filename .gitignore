@@ -6,3 +6,10 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# This project's canonical lockfile is bun.lock (see package.json /
+# AI Studio's own tooling). package-lock.json only appears here as a
+# side effect of running `npm install` to type-check/build/verify
+# changes outside AI Studio — committing it would give the project two
+# conflicting lockfiles.
+package-lock.json
