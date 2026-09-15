@@ -1,0 +1,6 @@
+{
+  "name": "Budget Tracker",
+  "description": "An intelligent personal finance and budget tracker with Gemini AI receipt scanning, voice transaction logging, 90-day predictive cash flow, auto-balancing budgets, smart price hike alerts, opportunity cost interceptor, goal delay simulation, and AI financial advisor.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
